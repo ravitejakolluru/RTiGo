@@ -30,4 +30,4 @@ COPY --from=build --chown=app:app /app/client/dist ./client/dist
 
 USER app
 EXPOSE 3001
-CMD ["sh", "-c", "npm run db:deploy && npm --workspace server start"]
+CMD ["sh", "-c", "npm --workspace server run db:deploy && npm --workspace server start"]
