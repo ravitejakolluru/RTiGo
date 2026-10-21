@@ -56,6 +56,20 @@ test("public report labels and external-sharing guidance are translated", () => 
   }
 });
 
+test("authentication timeout and email-delivery errors have translated messages", () => {
+  for (const { code } of languages) {
+    for (const key of [
+      "The request timed out. Please check your connection and try again.",
+      "Email delivery is temporarily unavailable. Please try again later.",
+      "If this account exists, its reset email could not be delivered right now. Please try again later.",
+    ]) {
+      const translated = translate(key, code);
+      assert.ok(translated);
+      if (code !== "en") assert.notEqual(translated, key);
+    }
+  }
+});
+
 test("transaction types use credit, debit, and withdraw labels in every language", () => {
   assert.equal(transactionTypeLabel("income"), "Credit");
   assert.equal(transactionTypeLabel("expense"), "Debit");

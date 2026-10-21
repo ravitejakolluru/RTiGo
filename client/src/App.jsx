@@ -13,24 +13,34 @@ import {
 } from "recharts";
 
 const api = async (path, options = {}) => {
-  let response;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 25000);
   try {
-    response = await fetch(`/api${path}`, {
+    const response = await fetch(`/api${path}`, {
       credentials: "include",
       ...options,
+      signal: controller.signal,
       headers: { ...(options.body ? { "Content-Type": "application/json" } : {}), ...options.headers },
     });
-  } catch {
+    const type = response.headers.get("content-type") || "";
+    if (!response.ok) {
+      const data = type.includes("application/json") ? await response.json() : null;
+      const error = new Error(data?.error || (response.status >= 500
+        ? "The API server is unavailable. Check its startup logs and database configuration."
+        : "Something went wrong. Please try again."));
+      error.status = response.status;
+      throw error;
+    }
+    return type.includes("application/json") ? await response.json() : await response.blob();
+  } catch (error) {
+    if (error.status) throw error;
+    if (error.name === "AbortError") {
+      throw new Error("The request timed out. Please check your connection and try again.");
+    }
     throw new Error("Could not reach the API. Check that the backend is running and the database is configured.");
+  } finally {
+    window.clearTimeout(timeout);
   }
-  const type = response.headers.get("content-type") || "";
-  if (!response.ok) {
-    const data = type.includes("application/json") ? await response.json() : null;
-    throw new Error(data?.error || (response.status >= 500
-      ? "The API server is unavailable. Check its startup logs and database configuration."
-      : "Something went wrong. Please try again."));
-  }
-  return type.includes("application/json") ? response.json() : response.blob();
 };
 
 const money = (value, language = "en", compact = false) => formatINR(value, language, compact);
@@ -227,7 +237,14 @@ function AuthScreen({ onLogin }) {
         const result = await api("/auth/login", { method: "POST", body: JSON.stringify(values) });
         onLogin(result.user);
       }
-    } catch (e) { setError(e.message); } finally { setBusy(false); }
+    } catch (e) {
+      if (mode === "login" && e.status === 403) {
+        setMode("verify");
+        setMessage(t(e.message));
+      } else {
+        setError(t(e.message));
+      }
+    } finally { setBusy(false); }
   };
   const resendVerification = async () => {
     setBusy(true); setError(""); setMessage("");

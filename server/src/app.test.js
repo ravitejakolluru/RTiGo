@@ -44,6 +44,244 @@ test("production server serves the frontend and client-side report routes", asyn
   });
 });
 
+test("registration, email verification, login, current session, and logout work end to end", async () => {
+  const users = new Map();
+  let sentVerificationCode;
+  const prisma = {
+    user: {
+      findUnique: async ({ where, select }) => {
+        const user = where.email
+          ? users.get(where.email) || null
+          : [...users.values()].find((entry) => entry.id === where.id) || null;
+        if (!user || !select) return user;
+        return Object.fromEntries(Object.keys(select).map((key) => [key, user[key]]));
+      },
+      create: async ({ data }) => {
+        const user = {
+          ...data,
+          id: "auth-owner",
+          verifiedAt: null,
+          resetAttempts: 0,
+        };
+        users.set(data.email, user);
+        return { id: user.id };
+      },
+      update: async ({ where, data }) => {
+        const user = [...users.values()].find((entry) => entry.id === where.id);
+        Object.assign(user, data);
+        return { id: user.id, name: user.name, email: user.email };
+      },
+    },
+  };
+  const app = createApp(prisma, { JWT_SECRET: SECRET, NODE_ENV: "production" }, {
+    sendEmail: async ({ code }) => { sentVerificationCode = code; },
+  });
+
+  await withServer(app, async (base) => {
+    const register = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Dedicated Test User", email: "rtigo-auth-test@example.test", password: "TestPassword-2026!" }),
+    });
+    assert.equal(register.status, 201);
+    assert.match((await register.json()).message, /Verification code sent/);
+    assert.match(sentVerificationCode, /^\d{6}$/);
+
+    const duplicate = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Duplicate", email: "RTIGO-AUTH-TEST@example.test", password: "TestPassword-2026!" }),
+    });
+    assert.equal(duplicate.status, 409);
+
+    const verify = await fetch(`${base}/api/auth/verify-email`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "rtigo-auth-test@example.test", code: sentVerificationCode }),
+    });
+    assert.equal(verify.status, 200);
+    const verificationCookie = verify.headers.get("set-cookie");
+    assert.match(verificationCookie, /HttpOnly/);
+    assert.match(verificationCookie, /Secure/);
+
+    const wrongLogin = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "rtigo-auth-test@example.test", password: "Incorrect-Password" }),
+    });
+    assert.equal(wrongLogin.status, 401);
+
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "rtigo-auth-test@example.test", password: "TestPassword-2026!" }),
+    });
+    assert.equal(login.status, 200);
+    const cookie = login.headers.get("set-cookie");
+    assert.match(cookie, /HttpOnly/);
+    assert.match(cookie, /Secure/);
+    assert.match(cookie, /fund_session=/);
+
+    const me = await fetch(`${base}/api/auth/me`, { headers: { Cookie: cookie.split(";")[0] } });
+    assert.equal(me.status, 200);
+    const sessionUser = await me.json();
+    assert.deepEqual(sessionUser.user, {
+      id: "auth-owner",
+      name: "Dedicated Test User",
+      email: "rtigo-auth-test@example.test",
+      verifiedAt: users.get("rtigo-auth-test@example.test").verifiedAt.toISOString(),
+    });
+
+    const anonymousMe = await fetch(`${base}/api/auth/me`);
+    assert.equal(anonymousMe.status, 401);
+
+    const logout = await fetch(`${base}/api/auth/logout`, { method: "POST", headers: { Cookie: cookie.split(";")[0] } });
+    assert.equal(logout.status, 200);
+    assert.match(logout.headers.get("set-cookie"), /fund_session=;.*Expires=Thu, 01 Jan 1970 00:00:00 GMT/);
+    const afterLogout = await fetch(`${base}/api/auth/me`);
+    assert.equal(afterLogout.status, 401);
+  });
+});
+
+test("login requires email verification before issuing a session", async () => {
+  const user = {
+    ...testUser,
+    verifiedAt: null,
+    passwordHash: await require("bcryptjs").hash("TestPassword-2026!", 4),
+  };
+  const app = createApp({ user: { findUnique: async () => user } }, { JWT_SECRET: SECRET });
+  await withServer(app, async (base) => {
+    const response = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: user.email, password: "TestPassword-2026!" }),
+    });
+    assert.equal(response.status, 403);
+    assert.deepEqual(await response.json(), { error: "Verify your email before signing in" });
+    assert.equal(response.headers.get("set-cookie"), null);
+  });
+});
+
+test("production rate limiting trusts one Render proxy hop and remains per-client", async () => {
+  const app = createApp({ user: { findUnique: async () => null } }, { JWT_SECRET: SECRET, NODE_ENV: "production" });
+  await withServer(app, async (base) => {
+    const request = () => fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Forwarded-For": "198.51.100.42" },
+      body: JSON.stringify({ email: "missing@example.test", password: "Incorrect-Password" }),
+    });
+    let lastResponse;
+    for (let attempt = 0; attempt < 21; attempt += 1) lastResponse = await request();
+    assert.equal(lastResponse.status, 429);
+
+    const otherClient = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Forwarded-For": "198.51.100.43" },
+      body: JSON.stringify({ email: "missing@example.test", password: "Incorrect-Password" }),
+    });
+    assert.equal(otherClient.status, 401);
+  });
+});
+
+test("forgot-password response completes for unknown emails without claiming delivery", async () => {
+  const app = createApp({ user: { findUnique: async () => null } }, { JWT_SECRET: SECRET });
+  await withServer(app, async (base) => {
+    const response = await fetch(`${base}/api/auth/forgot-password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "unknown@example.test" }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      message: "If that email is registered, a password reset code has been sent.",
+    });
+  });
+});
+
+test("forgot-password reports delivery failures safely instead of claiming success", async () => {
+  const user = { ...testUser, resetAttempts: 0 };
+  const prisma = {
+    user: {
+      findUnique: async () => user,
+      update: async ({ data }) => Object.assign(user, data),
+    },
+  };
+  const app = createApp(prisma, { JWT_SECRET: SECRET });
+  await withServer(app, async (base) => {
+    const response = await fetch(`${base}/api/auth/forgot-password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: user.email }),
+    });
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      error: "If this account exists, its reset email could not be delivered right now. Please try again later.",
+    });
+  });
+});
+
+test("password reset clears its code on success and caps invalid attempts", async () => {
+  const resetCode = "654321";
+  const user = {
+    ...testUser,
+    resetHash: crypto.createHash("sha256").update(resetCode).digest("hex"),
+    resetExpires: new Date(Date.now() + 60_000),
+    resetAttempts: 0,
+  };
+  let invalidAttempts = 0;
+  let savedPassword;
+  const prisma = {
+    user: {
+      findUnique: async () => ({ ...user }),
+      updateMany: async ({ where, data }) => {
+        if (where.resetAttempts?.lt) {
+          invalidAttempts += 1;
+          if (user.resetAttempts >= 5) return { count: 0 };
+          user.resetAttempts += data.resetAttempts.increment;
+          return { count: 1 };
+        }
+        if (where.resetAttempts?.gte && user.resetAttempts >= 5) {
+          user.resetHash = null;
+          user.resetExpires = null;
+          return { count: 1 };
+        }
+        return { count: 0 };
+      },
+      update: async ({ data }) => {
+        savedPassword = data.passwordHash;
+        Object.assign(user, data);
+        return user;
+      },
+    },
+  };
+  const app = createApp(prisma, { JWT_SECRET: SECRET });
+  await withServer(app, async (base) => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await fetch(`${base}/api/auth/reset-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: user.email, code: "000000", password: "NewTestPassword-2026!" }),
+      });
+      assert.equal(response.status, 400);
+    }
+    assert.equal(invalidAttempts, 5);
+    assert.equal(user.resetHash, null);
+
+    user.resetHash = crypto.createHash("sha256").update(resetCode).digest("hex");
+    user.resetExpires = new Date(Date.now() + 60_000);
+    user.resetAttempts = 0;
+    const success = await fetch(`${base}/api/auth/reset-password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: user.email, code: resetCode, password: "NewTestPassword-2026!" }),
+    });
+    assert.equal(success.status, 200);
+    assert.equal(user.resetHash, null);
+    assert.equal(user.resetAttempts, 0);
+    assert.equal(await require("bcryptjs").compare("NewTestPassword-2026!", savedPassword), true);
+  });
+});
+
 test("transaction deletion is always scoped to the authenticated owner", async (t) => {
   let lookup;
   const user = testUser;

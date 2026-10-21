@@ -16,10 +16,11 @@ const COOKIE = "fund_session";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SUPPORTED_LANGUAGES = new Set(["en", "hi", "te", "kn", "ta"]);
 
-function createApp(prisma, config = process.env) {
+function createApp(prisma, config = process.env, dependencies = {}) {
   const app = express();
   const origin = config.APP_ORIGIN || "http://localhost:5173";
-  if (config.TRUST_PROXY === "true") app.set("trust proxy", 1);
+  // Render places one trusted edge proxy in front of the app; never trust the full forwarded chain.
+  app.set("trust proxy", config.NODE_ENV === "production" || config.TRUST_PROXY === "true" ? 1 : false);
   app.use(helmet());
   app.use(cors({ origin, credentials: true }));
   app.use(express.json({ limit: "32kb" }));
@@ -133,11 +134,15 @@ function createApp(prisma, config = process.env) {
   }
 
   async function sendCode(email, subject, code) {
+    if (dependencies.sendEmail) return dependencies.sendEmail({ email, subject, code });
     if (!config.SMTP_HOST) throw new Error("SMTP_HOST is not configured");
     const transport = nodemailer.createTransport({
       host: config.SMTP_HOST,
       port: Number(config.SMTP_PORT || 587),
       secure: String(config.SMTP_SECURE) === "true",
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 15000,
       ...(config.SMTP_USER ? { auth: { user: config.SMTP_USER, pass: config.SMTP_PASSWORD } } : {}),
     });
     await transport.sendMail({ from: config.EMAIL_FROM, to: email, subject, text: `Your verification code is ${code}. It expires in 15 minutes.` });
@@ -173,7 +178,8 @@ function createApp(prisma, config = process.env) {
     } catch (error) {
       if (config.NODE_ENV === "production") {
         await prisma.user.delete({ where: { id: user.id } });
-        throw error;
+        console.error("Registration verification email delivery failed:", error.code || error.name);
+        throw Object.assign(new Error("Email delivery is temporarily unavailable. Please try again later."), { status: 503 });
       }
       console.error("Verification email could not be delivered; configure SMTP:", error.message);
       console.info(`Development verification code for ${email}: ${code}`);
@@ -250,9 +256,18 @@ function createApp(prisma, config = process.env) {
       const code = String(crypto.randomInt(100000, 1000000));
       await prisma.user.update({
         where: { id: user.id },
-        data: { resetHash: crypto.createHash("sha256").update(code).digest("hex"), resetExpires: new Date(Date.now() + 15 * 60 * 1000) },
+        data: {
+          resetHash: crypto.createHash("sha256").update(code).digest("hex"),
+          resetExpires: new Date(Date.now() + 15 * 60 * 1000),
+          resetAttempts: 0,
+        },
       });
-      await sendCode(user.email, "Reset your Fund Manager password", code);
+      try {
+        await sendCode(user.email, "Reset your Fund Manager password", code);
+      } catch (error) {
+        console.error("Password reset email delivery failed:", error.code || error.name);
+        throw Object.assign(new Error("If this account exists, its reset email could not be delivered right now. Please try again later."), { status: 503 });
+      }
     }
     return res.json({ message: "If that email is registered, a password reset code has been sent." });
   }));
@@ -266,13 +281,25 @@ function createApp(prisma, config = process.env) {
     }
     const user = await prisma.user.findUnique({ where: { email } });
     const hash = crypto.createHash("sha256").update(code).digest("hex");
-    if (!user || !user.resetExpires || user.resetExpires < new Date() || !user.resetHash
+    if (!user || !user.resetExpires || user.resetExpires < new Date() || !user.resetHash || user.resetAttempts >= 5
       || !crypto.timingSafeEqual(Buffer.from(user.resetHash), Buffer.from(hash))) {
+      if (user?.resetHash && user.resetExpires && user.resetExpires >= new Date() && user.resetAttempts < 5) {
+        const attempt = await prisma.user.updateMany({
+          where: { id: user.id, resetHash: user.resetHash, resetAttempts: { lt: 5 } },
+          data: { resetAttempts: { increment: 1 } },
+        });
+        if (attempt.count) {
+          await prisma.user.updateMany({
+            where: { id: user.id, resetAttempts: { gte: 5 } },
+            data: { resetHash: null, resetExpires: null },
+          });
+        }
+      }
       return res.status(400).json({ error: "Invalid or expired reset code" });
     }
     await prisma.user.update({
       where: { id: user.id },
-      data: { passwordHash: await bcrypt.hash(password, 12), resetHash: null, resetExpires: null },
+      data: { passwordHash: await bcrypt.hash(password, 12), resetHash: null, resetExpires: null, resetAttempts: 0 },
     });
     return res.json({ message: "Password updated. You can now sign in." });
   }));

@@ -18,6 +18,7 @@ model User {
   verifyAttempts Int         @default(0)
   resetHash     String?
   resetExpires  DateTime?
+  resetAttempts Int         @default(0)
   createdAt     DateTime     @default(now())
   account       Account?
   transactions  Transaction[]
