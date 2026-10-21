@@ -5,7 +5,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://your-render-service.onrender.com/api/:path*"
+      "destination": "https://rtigo.onrender.com/api/:path*"
     },
     {
       "source": "/(.*)",
