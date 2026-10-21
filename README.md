@@ -51,7 +51,7 @@ The frontend is hosted on Vercel; the Express API runs on Render. Vercel proxies
 
 1. Push the project to a private GitHub repository. Make sure `.env` and database exports are not committed.
 2. Provision a managed MySQL 8-compatible database and keep its TLS-enabled connection URL private.
-3. Import the GitHub repository into Vercel from the project root. Keep the build command `npm run build`, install command `npm ci`, and output directory `client/dist` (already set in `vercel.json`). Assign the Vercel production domain you want to use.
+3. Import the GitHub repository into Vercel from the project root. Keep the build command `npm run build`, install command `npm ci --include=dev`, and output directory `client/dist` (already set in `vercel.json`). Assign the Vercel production domain you want to use.
 4. Create a Render Blueprint from the same repository, using `render.yaml`. It is configured on the Free plan for initial testing. Free instances can sleep, so monthly report delivery is not reliable until you change the API service to an always-on paid plan.
 5. In the Render service environment, set:
    - `DATABASE_URL` to the managed MySQL connection URL.
