@@ -1,0 +1,126 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String       @id @default(cuid())
+  name          String
+  email         String       @unique
+  passwordHash  String
+  verifiedAt    DateTime?
+  verifyHash    String?
+  verifyExpires DateTime?
+  verifyAttempts Int         @default(0)
+  resetHash     String?
+  resetExpires  DateTime?
+  createdAt     DateTime     @default(now())
+  account       Account?
+  transactions  Transaction[]
+  schedules     PaymentSchedule[]
+  shares        ShareLink[]
+  audits        AuditLog[]
+  monthlyReportDeliveries MonthlyReportDelivery[]
+}
+
+model Account {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  name            String   @default("Personal funds")
+  language        String   @default("en")
+  openingBalance  Decimal  @default(0) @db.Decimal(14, 2)
+  allowOverdraft  Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Transaction {
+  id          String   @id @default(cuid())
+  userId      String
+  kind        String
+  amount      Decimal  @db.Decimal(14, 2)
+  title       String
+  counterparty String?
+  category    String?
+  happenedAt  DateTime @db.Date
+  status      String   @default("posted")
+  method      String?
+  notes       String?  @db.Text
+  scheduleId  String?  @unique
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  deletedAt   DateTime?
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  schedule    PaymentSchedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+
+  @@index([userId, happenedAt, deletedAt])
+  @@index([userId, kind, status, deletedAt])
+}
+
+model PaymentSchedule {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  amount      Decimal  @db.Decimal(14, 2)
+  recipient   String?
+  dueDate     DateTime @db.Date
+  category    String?
+  status      String   @default("scheduled")
+  notes       String?  @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transaction Transaction?
+
+  @@index([userId, dueDate, status])
+}
+
+model ShareLink {
+  id         String   @id @default(cuid())
+  userId     String
+  tokenHash  String   @unique
+  fromDate   DateTime @db.Date
+  toDate     DateTime @db.Date
+  fields     Json
+  expiresAt  DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  userId      String
+  entityType  String
+  entityId    String
+  action      String
+  beforeData  Json?
+  afterData   Json?
+  createdAt   DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, entityType, entityId, createdAt])
+}
+
+model MonthlyReportDelivery {
+  id          String   @id @default(cuid())
+  userId      String
+  periodStart DateTime @db.Date
+  status      String   @default("pending")
+  attemptedAt DateTime?
+  sentAt      DateTime?
+  lastError   String?  @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, periodStart])
+  @@index([status, attemptedAt])
+}
