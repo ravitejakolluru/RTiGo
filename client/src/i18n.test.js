@@ -60,6 +60,7 @@ test("authentication timeout and email-delivery errors have translated messages"
   for (const { code } of languages) {
     for (const key of [
       "The request timed out. Please check your connection and try again.",
+      "The database is temporarily unavailable. Please try again shortly.",
       "Email delivery is temporarily unavailable. Please try again later.",
       "If this account exists, its reset email could not be delivered right now. Please try again later.",
     ]) {

@@ -15,6 +15,7 @@ const { createFinancialPdf } = require("./pdf-layout");
 const COOKIE = "fund_session";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SUPPORTED_LANGUAGES = new Set(["en", "hi", "te", "kn", "ta"]);
+const DATABASE_UNAVAILABLE_CODES = new Set(["P1001", "P1002", "P1008", "P1017", "P2024"]);
 
 function createApp(prisma, config = process.env, dependencies = {}) {
   const app = express();
@@ -670,8 +671,12 @@ function createApp(prisma, config = process.env, dependencies = {}) {
   }
 
   app.use((error, _req, res, _next) => {
-    console.error(error);
     if (res.headersSent) return;
+    if (DATABASE_UNAVAILABLE_CODES.has(error.code)) {
+      console.error("Database temporarily unavailable:", error.code);
+      return res.status(503).json({ error: "The database is temporarily unavailable. Please try again shortly." });
+    }
+    console.error(error);
     if (error.code === "P2002") return res.status(409).json({ error: "A record with that value already exists" });
     if (error.code === "P2025") return res.status(404).json({ error: "Record not found" });
     const status = error.status || (error.message?.includes("date range") ? 400 : 500);

@@ -31,6 +31,26 @@ test("protected transactions require an authenticated session", async (t) => {
   assert.equal(response.status, 401);
 });
 
+test("database connection failures return a safe retryable service-unavailable response", async () => {
+  const prisma = {
+    user: {
+      findUnique: async () => { throw Object.assign(new Error("database host details"), { code: "P1001" }); },
+    },
+  };
+  const app = createApp(prisma, { JWT_SECRET: SECRET });
+  await withServer(app, async (base) => {
+    const response = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "test@example.test", password: "NotARealPassword" }),
+    });
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      error: "The database is temporarily unavailable. Please try again shortly.",
+    });
+  });
+});
+
 test("production server serves the frontend and client-side report routes", async () => {
   const app = createApp({}, { NODE_ENV: "production", JWT_SECRET: SECRET, APP_ORIGIN: "https://rtigo.example.test" });
   await withServer(app, async (base) => {
